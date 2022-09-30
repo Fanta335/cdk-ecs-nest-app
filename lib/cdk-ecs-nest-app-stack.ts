@@ -58,27 +58,18 @@ export class CdkEcsNestAppStack extends Stack {
       vpc,
       service: new ec2.InterfaceVpcEndpointService(`com.amazonaws.${REGION}.ecr.api`),
       securityGroups: [securityGroupPrivateLink],
+      privateDnsEnabled: true,
     });
     const ECSPrivateLinkDKR = new ec2.InterfaceVpcEndpoint(this, "ECSPrivateLinkDKR", {
       vpc,
       service: new ec2.InterfaceVpcEndpointService(`com.amazonaws.${REGION}.ecr.dkr`),
       securityGroups: [securityGroupPrivateLink],
+      privateDnsEnabled: true,
     });
     const ECSPrivateLinkS3 = new ec2.GatewayVpcEndpoint(this, "ECSPrivateLinkS3", {
       vpc,
       service: ec2.GatewayVpcEndpointAwsService.S3,
     });
-
-    const policyStatementFullAccess = new iam.PolicyStatement({
-      principals: [new iam.AnyPrincipal()],
-      actions: ["*"],
-      resources: ["*"],
-    });
-
-    // add policy
-    ECSPrivateLinkAPI.addToPolicy(policyStatementFullAccess);
-    ECSPrivateLinkDKR.addToPolicy(policyStatementFullAccess);
-    ECSPrivateLinkS3.addToPolicy(policyStatementFullAccess);
 
     // ALB
     const alb = new elbv2.ApplicationLoadBalancer(this, "ALB", {
@@ -94,7 +85,7 @@ export class CdkEcsNestAppStack extends Stack {
 
     // create ECR repository
     const repository = new ecr.Repository(this, "Repository", {
-      repositoryName: "cdk-nest-chat-app",
+      repositoryName: "cdk-ecs-nest-app",
     });
 
     // ECR image
@@ -115,7 +106,7 @@ export class CdkEcsNestAppStack extends Stack {
     });
 
     const container = fargateTaskDefinition.addContainer("Container", {
-      containerName: "NestChatAppContainer",
+      containerName: "CdkEcsNestAppContainer",
       image: ecs.ContainerImage.fromEcrRepository(repository),
     });
 

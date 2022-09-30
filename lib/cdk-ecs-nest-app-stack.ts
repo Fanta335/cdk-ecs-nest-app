@@ -1,4 +1,16 @@
-import { aws_ec2 as ec2, aws_ecs as ecs, aws_ecr as ecr, aws_iam as iam, aws_elasticloadbalancingv2 as elbv2, Stack, StackProps, Duration } from "aws-cdk-lib";
+import {
+  aws_ec2 as ec2,
+  aws_ecs as ecs,
+  aws_ecr as ecr,
+  aws_iam as iam,
+  aws_rds as rds,
+  aws_secretsmanager as secretsmanager,
+  aws_elasticloadbalancingv2 as elbv2,
+  Stack,
+  StackProps,
+  Duration,
+  RemovalPolicy,
+} from "aws-cdk-lib";
 import { DockerImageAsset } from "aws-cdk-lib/aws-ecr-assets";
 import * as ecrdeploy from "cdk-ecr-deployment";
 import * as path from "path";
@@ -53,22 +65,93 @@ export class CdkEcsNestAppStack extends Stack {
       securityGroupName: "SGPL",
     });
 
+    // SG for Bastion host
+    const securityGroupBastion = new ec2.SecurityGroup(this, "SecurityGroupBastion", {
+      vpc,
+      description: "Security group Bastion",
+      securityGroupName: "SGBastion",
+    });
+    securityGroupBastion.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), "Allow SSH connection from ");
+
+    // SG for RDS
+    const securityGroupRDS = new ec2.SecurityGroup(this, "SecurityGroupRDS", {
+      vpc,
+      description: "Security group RDS",
+      securityGroupName: "SGRDS",
+    });
+    securityGroupRDS.addIngressRule(securityGroupApp, ec2.Port.tcp(3306), "Allow MySQL connection from App");
+    securityGroupRDS.addIngressRule(securityGroupBastion, ec2.Port.tcp(3306), "Allow MySQL connection from Bastion");
+
     // VPC endpoint
-    const ECSPrivateLinkAPI = new ec2.InterfaceVpcEndpoint(this, "ECSPrivateLinkAPI", {
+    new ec2.InterfaceVpcEndpoint(this, "ECSPrivateLinkAPI", {
       vpc,
       service: new ec2.InterfaceVpcEndpointService(`com.amazonaws.${REGION}.ecr.api`),
       securityGroups: [securityGroupPrivateLink],
       privateDnsEnabled: true,
     });
-    const ECSPrivateLinkDKR = new ec2.InterfaceVpcEndpoint(this, "ECSPrivateLinkDKR", {
+    new ec2.InterfaceVpcEndpoint(this, "ECSPrivateLinkDKR", {
       vpc,
       service: new ec2.InterfaceVpcEndpointService(`com.amazonaws.${REGION}.ecr.dkr`),
       securityGroups: [securityGroupPrivateLink],
       privateDnsEnabled: true,
     });
-    const ECSPrivateLinkS3 = new ec2.GatewayVpcEndpoint(this, "ECSPrivateLinkS3", {
+    new ec2.GatewayVpcEndpoint(this, "ECSPrivateLinkS3", {
       vpc,
       service: ec2.GatewayVpcEndpointAwsService.S3,
+    });
+    // new ec2.InterfaceVpcEndpoint(this, "ECSPrivateLinkLogs", {
+    //   vpc,
+    //   service: new ec2.InterfaceVpcEndpointService("com.amazonaws.ap-northeast-1.logs"),
+    //   securityGroups: [securityGroupPrivateLink],
+    // });
+
+    // Bastion host
+    const bastionHost = new ec2.BastionHostLinux(this, "BastionHost", {
+      vpc,
+      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T2, ec2.InstanceSize.MICRO),
+      securityGroup: securityGroupBastion,
+      subnetSelection: {
+        subnetType: ec2.SubnetType.PUBLIC,
+      },
+    });
+    bastionHost.instance.addUserData("yum -y update", "yum install -y mysql jq");
+
+    // RDS Credentials
+    const databaseCredentialSecret = new secretsmanager.Secret(this, "databaseCredentialSecret", {
+      secretName: "cdk-ecs-nest-app-rds-secrets",
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({
+          username: "dbuser",
+        }),
+        excludePunctuation: true,
+        includeSpace: false,
+        generateStringKey: "password",
+      },
+    });
+
+    // RDS
+    const rdsInstance = new rds.DatabaseInstance(this, "RDSInstance", {
+      databaseName: "cdk-ecs-nest-app-db",
+      engine: rds.DatabaseInstanceEngine.MYSQL,
+      vpc,
+      vpcSubnets: {
+        subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
+      },
+      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO),
+      securityGroups: [securityGroupRDS],
+      // multiAz: true,
+      removalPolicy: RemovalPolicy.DESTROY,
+      credentials: rds.Credentials.fromSecret(databaseCredentialSecret),
+      deletionProtection: false,
+      parameterGroup: new rds.ParameterGroup(this, "ParameterGroup", {
+        engine: rds.DatabaseInstanceEngine.mysql({
+          version: rds.MysqlEngineVersion.VER_8_0_26,
+        }),
+        parameters: {
+          character_set_client: "utf8mb4",
+          character_set_server: "utf8mb4",
+        },
+      }),
     });
 
     // ALB
@@ -121,9 +204,10 @@ export class CdkEcsNestAppStack extends Stack {
       clusterName: "fargateCluster",
     });
 
-    const service = new ecs.FargateService(this, "FargateService", {
+    const fargateService = new ecs.FargateService(this, "FargateService", {
       cluster,
       serviceName: "fargateService",
+      desiredCount: 1, // Temp val for testing
       taskDefinition: fargateTaskDefinition,
       securityGroups: [securityGroupApp],
       vpcSubnets: {
@@ -131,17 +215,24 @@ export class CdkEcsNestAppStack extends Stack {
       },
     });
 
+    const cfnService = fargateService.node.tryFindChild("Service") as ecs.CfnService;
+    cfnService.launchType = undefined;
+    cfnService.capacityProviderStrategy = [
+      { capacityProvider: "FARGATE_SPOT", weight: 2 },
+      { capacityProvider: "FARGATE", weight: 1 },
+    ];
+
     listener.addTargets("ECS", {
       port: 80,
       targets: [
-        service.loadBalancerTarget({
+        fargateService.loadBalancerTarget({
           containerName: container.containerName,
           containerPort: 3000,
         }),
       ],
     });
 
-    const autoScaling = service.autoScaleTaskCount({
+    const autoScaling = fargateService.autoScaleTaskCount({
       minCapacity: 1,
       maxCapacity: 2,
     });

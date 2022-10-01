@@ -99,6 +99,11 @@ export class CdkEcsNestAppStack extends Stack {
       vpc,
       service: ec2.GatewayVpcEndpointAwsService.S3,
     });
+    new ec2.InterfaceVpcEndpoint(this, "SecretsManagerPrivateLink", {
+      vpc,
+      service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+      securityGroups: [securityGroupPrivateLink],
+    });
     // new ec2.InterfaceVpcEndpoint(this, "ECSPrivateLinkLogs", {
     //   vpc,
     //   service: new ec2.InterfaceVpcEndpointService("com.amazonaws.ap-northeast-1.logs"),
@@ -118,7 +123,7 @@ export class CdkEcsNestAppStack extends Stack {
 
     // RDS Credentials
     const databaseCredentialSecret = new secretsmanager.Secret(this, "databaseCredentialSecret", {
-      secretName: "cdk-ecs-nest-app-rds-secrets",
+      secretName: "rds-secrets",
       generateSecretString: {
         secretStringTemplate: JSON.stringify({
           username: "dbuser",
@@ -131,7 +136,6 @@ export class CdkEcsNestAppStack extends Stack {
 
     // RDS
     const rdsInstance = new rds.DatabaseInstance(this, "RDSInstance", {
-      databaseName: "cdk-ecs-nest-app-db",
       engine: rds.DatabaseInstanceEngine.MYSQL,
       vpc,
       vpcSubnets: {
@@ -188,15 +192,30 @@ export class CdkEcsNestAppStack extends Stack {
       cpu: 1024,
     });
 
+    fargateTaskDefinition.addToExecutionRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameters", "secretsmanager:GetSecretValue", "kms:Decrypt"],
+        resources: [databaseCredentialSecret.secretArn],
+      })
+    );
+
     const container = fargateTaskDefinition.addContainer("Container", {
       containerName: "CdkEcsNestAppContainer",
       image: ecs.ContainerImage.fromEcrRepository(repository),
-    });
-
-    container.addPortMappings({
-      hostPort: 3000,
-      containerPort: 3000,
-      protocol: ecs.Protocol.TCP,
+      portMappings: [
+        {
+          hostPort: 3000,
+          containerPort: 3000,
+          protocol: ecs.Protocol.TCP,
+        },
+      ],
+      secrets: {
+        PASSWORD: ecs.Secret.fromSecretsManager(databaseCredentialSecret, "password"),
+        PORT: ecs.Secret.fromSecretsManager(databaseCredentialSecret, "port"),
+        HOST: ecs.Secret.fromSecretsManager(databaseCredentialSecret, "host"),
+        USERNAME: ecs.Secret.fromSecretsManager(databaseCredentialSecret, "username"),
+        DBNAME: ecs.Secret.fromSecretsManager(databaseCredentialSecret, "dbname"),
+      },
     });
 
     const cluster = new ecs.Cluster(this, "fargate-cluster", {

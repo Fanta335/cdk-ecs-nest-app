@@ -3,6 +3,7 @@ import {
   aws_ecs as ecs,
   aws_ecr as ecr,
   aws_iam as iam,
+  aws_s3 as s3,
   aws_rds as rds,
   aws_secretsmanager as secretsmanager,
   aws_elasticloadbalancingv2 as elbv2,
@@ -10,6 +11,7 @@ import {
   StackProps,
   Duration,
   RemovalPolicy,
+  SecretValue,
 } from "aws-cdk-lib";
 import { DockerImageAsset } from "aws-cdk-lib/aws-ecr-assets";
 import * as ecrdeploy from "cdk-ecr-deployment";
@@ -158,6 +160,29 @@ export class CdkEcsNestAppStack extends Stack {
       }),
     });
 
+    // S3
+    const s3Bucket = new s3.Bucket(this, "Bucket", {
+      bucketName: id.toLowerCase() + "-bucket",
+      publicReadAccess: true,
+    });
+
+    // IAM user for S3
+    const iamUserForS3 = new iam.User(this, "iamUserForS3", {
+      userName: id + "-s3-admin",
+      managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName("AmazonS3FullAccess")],
+    });
+    const accessKey = new iam.AccessKey(this, "AccessKeyId", { user: iamUserForS3 });
+
+    // S3 credentials
+    const iamUserForS3CredentialsSecret = new secretsmanager.Secret(this, "iamUserForS3CredentialsSecret", {
+      secretName: id + "-iam-user-for-s3-credentials",
+      secretObjectValue: {
+        username: SecretValue.unsafePlainText(iamUserForS3.userName),
+        accessKeyId: SecretValue.unsafePlainText(accessKey.accessKeyId),
+        secretAccessKey: accessKey.secretAccessKey,
+      },
+    });
+
     // ALB
     const alb = new elbv2.ApplicationLoadBalancer(this, "ALB", {
       vpc,
@@ -215,6 +240,12 @@ export class CdkEcsNestAppStack extends Stack {
         HOST: ecs.Secret.fromSecretsManager(databaseCredentialSecret, "host"),
         USERNAME: ecs.Secret.fromSecretsManager(databaseCredentialSecret, "username"),
         DBNAME: ecs.Secret.fromSecretsManager(databaseCredentialSecret, "dbname"),
+        S3_IAM_ACCESS_KEY_ID: ecs.Secret.fromSecretsManager(iamUserForS3CredentialsSecret, "accessKeyId"),
+        S3_IAM_SECRET_ACCESS_KEY: ecs.Secret.fromSecretsManager(iamUserForS3CredentialsSecret, "secretAccessKey"),
+      },
+      environment: {
+        AWS_REGION: REGION || "ap-northeast-1",
+        S3_BUCKET_NAME: s3Bucket.bucketName,
       },
     });
 

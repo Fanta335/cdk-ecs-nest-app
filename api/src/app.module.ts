@@ -4,6 +4,7 @@ import { AppService } from './app.service';
 import { CatsModule } from './cats/cats.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { MessagesModule } from './messages/messages.module';
 import configurations from 'src/configurations';
 
 @Module({
@@ -20,6 +21,7 @@ import configurations from 'src/configurations';
       }),
     }),
     CatsModule,
+    MessagesModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -280,6 +280,7 @@ export class CdkEcsNestAppStack extends Stack {
           containerPort: 3000,
         }),
       ],
+      stickinessCookieDuration: Duration.seconds(86400),
     });
 
     const autoScaling = fargateService.autoScaleTaskCount({
